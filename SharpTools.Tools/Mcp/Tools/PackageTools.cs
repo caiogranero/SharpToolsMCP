@@ -210,8 +210,7 @@ public static class PackageTools {
             }
 
             // Save the updated project file
-            await documentOperations.WriteFileAsync(projectPath, xDoc.ToString(), true, cancellationToken,
-                $"{(isUpdate ? "Updated" : "Added")} NuGet package {packageId} with version {version}");
+            await documentOperations.WriteFileAsync(projectPath, xDoc.ToString(), true, cancellationToken);
         } catch (Exception ex) {
             logger.LogError(ex, "Error updating PackageReference in project file {ProjectPath}", projectPath);
             throw new McpException($"Failed to update PackageReference in project file: {ex.Message}");
@@ -264,8 +263,7 @@ public static class PackageTools {
             }
 
             // Save the updated packages.config
-            await documentOperations.WriteFileAsync(packagesConfigPath, xDoc.ToString(), true, cancellationToken,
-                $"{(isUpdate ? "Updated" : "Added")} NuGet package {packageId} with version {version} in packages.config");
+            await documentOperations.WriteFileAsync(packagesConfigPath, xDoc.ToString(), true, cancellationToken);
         } catch (Exception ex) {
             logger.LogError(ex, "Error updating packages.config at {PackagesConfigPath}", packagesConfigPath);
             throw new McpException($"Failed to update packages.config: {ex.Message}");

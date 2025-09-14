@@ -20,15 +20,12 @@ namespace SharpTools.Tools.Services;
 
 public class CodeModificationService : ICodeModificationService {
     private readonly ISolutionManager _solutionManager;
-    private readonly IGitService _gitService;
     private readonly ILogger<CodeModificationService> _logger;
 
     public CodeModificationService(
         ISolutionManager solutionManager,
-        IGitService gitService,
         ILogger<CodeModificationService> logger) {
         _solutionManager = solutionManager ?? throw new ArgumentNullException(nameof(solutionManager));
-        _gitService = gitService ?? throw new ArgumentNullException(nameof(gitService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -422,20 +419,17 @@ public class CodeModificationService : ICodeModificationService {
         _logger.LogDebug("Document formatted: {DocumentPath}", document.FilePath);
         return formattedDocument;
     }
-    public async Task ApplyChangesAsync(Solution newSolution, CancellationToken cancellationToken, string commitMessage, IEnumerable<string>? additionalFilePaths = null) {
+    public async Task ApplyChangesAsync(Solution newSolution, CancellationToken cancellationToken, IEnumerable<string>? additionalFilePaths = null) {
         if (_solutionManager.CurrentWorkspace is not MSBuildWorkspace workspace) {
             _logger.LogError("Cannot apply changes: Workspace is not an MSBuildWorkspace or is null.");
             throw new InvalidOperationException("Workspace is not suitable for applying changes.");
         }
 
         var originalSolution = _solutionManager.CurrentSolution ?? throw new InvalidOperationException("Original solution is null before applying changes.");
-        var solutionPath = originalSolution.FilePath ?? "";
 
         var solutionChanges = newSolution.GetChanges(originalSolution);
         var finalSolutionToApply = newSolution;
 
-        // Collect changed file paths for git operations - include both changed and new documents
-        var changedFilePaths = new List<string>();
 
         foreach (var projectChange in solutionChanges.GetProjectChanges()) {
             // Handle changed documents
@@ -446,9 +440,6 @@ public class CodeModificationService : ICodeModificationService {
                     var formattedDocument = await FormatDocumentAsync(documentToFormat, cancellationToken);
                     finalSolutionToApply = formattedDocument.Project.Solution;
 
-                    if (!string.IsNullOrEmpty(documentToFormat.FilePath)) {
-                        changedFilePaths.Add(documentToFormat.FilePath);
-                    }
                 }
             }
 
@@ -460,21 +451,9 @@ public class CodeModificationService : ICodeModificationService {
                     var formattedDocument = await FormatDocumentAsync(addedDocument, cancellationToken);
                     finalSolutionToApply = formattedDocument.Project.Solution;
 
-                    if (!string.IsNullOrEmpty(addedDocument.FilePath)) {
-                        changedFilePaths.Add(addedDocument.FilePath);
-                        _logger.LogInformation("Added new document for git tracking: {DocumentPath}", addedDocument.FilePath);
-                    }
                 }
             }
 
-            // Handle removed documents
-            foreach (var removedDocumentId in projectChange.GetRemovedDocuments()) {
-                var removedDocument = originalSolution.GetDocument(removedDocumentId);
-                if (removedDocument != null && !string.IsNullOrEmpty(removedDocument.FilePath)) {
-                    changedFilePaths.Add(removedDocument.FilePath);
-                    _logger.LogInformation("Marked removed document for git tracking: {DocumentPath}", removedDocument.FilePath);
-                }
-            }
         }
 
         _logger.LogInformation("Applying changes to workspace for {DocumentCount} changed documents across {ProjectCount} projects.",
@@ -484,97 +463,11 @@ public class CodeModificationService : ICodeModificationService {
         if (workspace.TryApplyChanges(finalSolutionToApply)) {
             _logger.LogInformation("Changes applied successfully to the workspace.");
 
-            // If additional file paths are provided, add them to the changed file paths
-            if (additionalFilePaths != null) {
-                changedFilePaths.AddRange(additionalFilePaths.Where(fp => !string.IsNullOrEmpty(fp) && File.Exists(fp)));
-            }
-            // Git operations after successful changes
-            await ProcessGitOperationsAsync(solutionPath, changedFilePaths, commitMessage, cancellationToken);
 
             _solutionManager.RefreshCurrentSolution();
         } else {
             _logger.LogError("Failed to apply changes to the workspace.");
             throw new InvalidOperationException("Failed to apply changes to the workspace. Files might have been modified externally.");
         }
-    }
-    private async Task ProcessGitOperationsAsync(string solutionPath, List<string> changedFilePaths, string commitMessage, CancellationToken cancellationToken) {
-        if (string.IsNullOrEmpty(solutionPath) || changedFilePaths.Count == 0) {
-            return;
-        }
-
-        try {
-            // Check if solution is in a git repo
-            if (!await _gitService.IsRepositoryAsync(solutionPath, cancellationToken)) {
-                _logger.LogDebug("Solution is not in a Git repository, skipping Git operations");
-                return;
-            }
-
-            _logger.LogDebug("Solution is in a Git repository, processing Git operations");
-
-            // Check if already on sharptools branch
-            if (!await _gitService.IsOnSharpToolsBranchAsync(solutionPath, cancellationToken)) {
-                _logger.LogInformation("Not on a SharpTools branch, creating one");
-                await _gitService.EnsureSharpToolsBranchAsync(solutionPath, cancellationToken);
-            }
-
-            // Commit changes with the provided commit message
-            await _gitService.CommitChangesAsync(solutionPath, changedFilePaths, commitMessage, cancellationToken);
-            _logger.LogInformation("Git operations completed successfully with commit message: {CommitMessage}", commitMessage);
-        } catch (Exception ex) {
-            // Log but don't fail the operation if Git operations fail
-            _logger.LogWarning(ex, "Git operations failed but code changes were still applied");
-        }
-    }
-    public async Task<(bool success, string message)> UndoLastChangeAsync(CancellationToken cancellationToken) {
-        if (_solutionManager.CurrentWorkspace is not MSBuildWorkspace workspace) {
-            _logger.LogError("Cannot undo changes: Workspace is not an MSBuildWorkspace or is null.");
-            var message = "Error: Workspace is not an MSBuildWorkspace or is null. Cannot undo.";
-            return (false, message);
-        }
-
-        var currentSolution = _solutionManager.CurrentSolution;
-        if (currentSolution?.FilePath == null) {
-            _logger.LogError("Cannot undo changes: Current solution or its file path is null.");
-            var message = "Error: No solution loaded or solution file path is null. Cannot undo.";
-            return (false, message);
-        }
-
-        var solutionPath = currentSolution.FilePath;
-
-        // Check if solution is in a git repository
-        if (!await _gitService.IsRepositoryAsync(solutionPath, cancellationToken)) {
-            _logger.LogError("Cannot undo changes: Solution is not in a Git repository.");
-            throw new McpException("Error: Solution is not in a Git repository. Undo functionality requires Git version control.");
-        }
-
-        // Check if we're on a sharptools branch
-        if (!await _gitService.IsOnSharpToolsBranchAsync(solutionPath, cancellationToken)) {
-            _logger.LogError("Cannot undo changes: Not on a SharpTools branch.");
-            var message = "Error: Not on a SharpTools branch. Undo is only available on SharpTools branches.";
-            return (false, message);
-        }
-
-        _logger.LogInformation("Attempting to undo last change by reverting last Git commit.");
-
-        // Perform git revert with diff
-        var (revertSuccess, diff) = await _gitService.RevertLastCommitAsync(solutionPath, cancellationToken);
-        if (!revertSuccess) {
-            _logger.LogError("Git revert operation failed.");
-            var message = "Error: Failed to revert the last Git commit. There may be no commits to revert or the operation failed.";
-            return (false, message);
-        }
-
-        // Reload the solution from disk to reflect the reverted changes
-        await _solutionManager.ReloadSolutionFromDiskAsync(cancellationToken);
-
-        _logger.LogInformation("Successfully reverted the last change using Git.");
-        var successMessage = "Successfully reverted the last change by reverting the last Git commit. Solution reloaded from disk.";
-
-        // Add the diff to the success message if available
-        if (!string.IsNullOrEmpty(diff)) {
-            successMessage += "\n\nChanges undone:\n" + diff;
-        }
-
-        return (true, successMessage);
     }
 }

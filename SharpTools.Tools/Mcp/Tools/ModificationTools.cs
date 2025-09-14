@@ -40,7 +40,6 @@ public static class ModificationTools {
         [Description("The C# code to add.")] string codeSnippet,
         [Description("If the target is a partial type, specifies which file to add to. Set to 'auto' to determine automatically.")] string fileNameHint,
         [Description("Suggest a line number to insert the member near. '-1' to determine automatically.")] int lineNumberHint,
-        string commitMessage,
         CancellationToken cancellationToken = default) {
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
             // Validate parameters
@@ -107,8 +106,7 @@ public static class ModificationTools {
                 // Use the lineNumberHint parameter when calling AddMemberAsync
                 var newSolution = await modificationService.AddMemberAsync(document.Id, typeSymbol, memberSyntax, lineNumberHint, cancellationToken);
 
-                string finalCommitMessage = $"Add {memberName} to {typeSymbol.Name}: " + commitMessage;
-                await modificationService.ApplyChangesAsync(newSolution, cancellationToken, finalCommitMessage);
+                await modificationService.ApplyChangesAsync(newSolution, cancellationToken);
 
                 // Check for compilation errors after adding the code
                 var updatedDocument = solutionManager.CurrentSolution.GetDocument(document.Id);
@@ -230,7 +228,6 @@ public static class ModificationTools {
         ILogger<ModificationToolsLogCategory> logger,
         [Description("FQN of the member or type to rewrite.")] string fullyQualifiedMemberName,
         [Description("The new C# code for the member or type. *If this member has attributes or XML documentation, they MUST be included here.* To Delete the target instead, set this to `// Delete {memberName}`.")] string newMemberCode,
-        string commitMessage,
         CancellationToken cancellationToken = default) {
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
             ErrorHandlingHelpers.ValidateStringParameter(fullyQualifiedMemberName, nameof(fullyQualifiedMemberName), logger);
@@ -263,7 +260,6 @@ public static class ModificationTools {
             string symbolName = symbol.Name;
 
             bool isDelete = newMemberCode.StartsWith("// Delete", StringComparison.OrdinalIgnoreCase);
-            string finalCommitMessage = (isDelete ? $"Delete {symbolName}" : $"Update {symbolName}") + ": " + commitMessage;
             if (isDelete) {
                 var commentTrivia = SyntaxFactory.Comment(newMemberCode);
                 var emptyNode = SyntaxFactory.EmptyStatement()
@@ -272,7 +268,7 @@ public static class ModificationTools {
 
                 try {
                     var newSolution = await modificationService.ReplaceNodeAsync(document.Id, oldNode, emptyNode, cancellationToken);
-                    await modificationService.ApplyChangesAsync(newSolution, cancellationToken, finalCommitMessage);
+                    await modificationService.ApplyChangesAsync(newSolution, cancellationToken);
 
                     var updatedDocument = solutionManager.CurrentSolution.GetDocument(document.Id);
                     if (updatedDocument != null) {
@@ -319,7 +315,7 @@ public static class ModificationTools {
 
             try {
                 var newSolution = await modificationService.ReplaceNodeAsync(document.Id, oldNode, newNode, cancellationToken);
-                await modificationService.ApplyChangesAsync(newSolution, cancellationToken, finalCommitMessage);
+                await modificationService.ApplyChangesAsync(newSolution, cancellationToken);
 
                 if (solutionManager.CurrentSolution is null) {
                     throw new McpException("Current solution is unexpectedly null after applying changes.");
@@ -356,7 +352,6 @@ public static class ModificationTools {
         ILogger<ModificationToolsLogCategory> logger,
         [Description("FQN of the symbol to rename.")] string fullyQualifiedSymbolName,
         [Description("The new name for the symbol.")] string newName,
-        string commitMessage,
         CancellationToken cancellationToken = default) {
 
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
@@ -381,7 +376,6 @@ public static class ModificationTools {
                 throw new McpException($"Cannot rename implicitly declared symbol '{fullyQualifiedSymbolName}'.");
             }
 
-            string finalCommitMessage = $"Rename {symbol.Name} to {newName}: " + commitMessage;
 
             try {
                 // Perform the rename operation
@@ -397,7 +391,7 @@ public static class ModificationTools {
                 }
 
                 // Apply the changes with the commit message
-                await modificationService.ApplyChangesAsync(newSolution, cancellationToken, finalCommitMessage);
+                await modificationService.ApplyChangesAsync(newSolution, cancellationToken);
 
                 // Check for compilation errors after renaming the symbol using centralized ContextInjectors
                 // Get the first few affected documents to check
@@ -454,7 +448,6 @@ public static class ModificationTools {
         [Description("FQN of the symbol whose references should be replaced.")] string fullyQualifiedSymbolName,
         [Description("The C# code replace references with.")] string replacementCode,
         [Description("Only replace symbols in files with this pattern. Supports globbing (`*`).")] string filenameFilter,
-        string commitMessage,
         CancellationToken cancellationToken = default) {
 
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
@@ -478,7 +471,6 @@ public static class ModificationTools {
                 ? replacementCode.Substring(0, 30) + "..."
                 : replacementCode;
 
-            string finalCommitMessage = $"Replace references to {symbol.Name} with {shortReplacementCode}: " + commitMessage;
 
             // Validate that the replacement code can be parsed as a valid C# expression
             try {
@@ -552,7 +544,7 @@ public static class ModificationTools {
                 }
 
                 // Apply the changes
-                await modificationService.ApplyChangesAsync(newSolution, cancellationToken, finalCommitMessage);
+                await modificationService.ApplyChangesAsync(newSolution, cancellationToken);
 
                 // Check for compilation errors in changed documents
                 var changedDocIds = solutionChanges.GetProjectChanges()
@@ -593,28 +585,6 @@ public static class ModificationTools {
             }
         }, logger, nameof(ReplaceAllReferences), cancellationToken);
     }
-    [McpServerTool(Name = ToolHelpers.SharpToolPrefix + nameof(Undo), Idempotent = false, Destructive = true, OpenWorld = false, ReadOnly = false)]
-    [Description($"Reverts the last applied change to the solution. You can undo all consecutive changes you have made. Returns a diff of the change that was undone.")]
-    public static async Task<string> Undo(
-        ISolutionManager solutionManager,
-        ICodeModificationService modificationService,
-        ILogger<ModificationToolsLogCategory> logger,
-        CancellationToken cancellationToken) {
-
-        return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
-            ToolHelpers.EnsureSolutionLoadedWithDetails(solutionManager, logger, nameof(Undo));
-            logger.LogInformation("Executing '{UndoLastChange}'", nameof(Undo));
-
-            var (success, message) = await modificationService.UndoLastChangeAsync(cancellationToken);
-            if (!success) {
-                logger.LogWarning("Undo operation failed: {Message}", message);
-                throw new McpException($"Failed to undo the last change. {message}");
-            }
-            logger.LogInformation("Undo operation succeeded");
-            return message;
-
-        }, logger, nameof(Undo), cancellationToken);
-    }
     [McpServerTool(Name = ToolHelpers.SharpToolPrefix + nameof(FindAndReplace), Idempotent = false, Destructive = true, OpenWorld = false, ReadOnly = false)]
     [Description("Every developer's favorite. Use this for all small edits (code tweaks, usings, namespaces, interface implementations, attributes, etc.) instead of rewriting large members or types.")]
     public static async Task<string> FindAndReplace(
@@ -625,7 +595,6 @@ public static class ModificationTools {
         [Description("Regex operating in multiline mode, so `^` and `$` match per line. Always use `\\s*` at the beginnings of lines for unknown indentation. Make sure to escape your escapes for json.")] string regexPattern,
         [Description("Replacement text, which can include regex groups ($1, ${name}, etc.)")] string replacementText,
         [Description("Target, which can be either a FQN (replaces text within a declaration) or a filepath supporting globbing (`*`) (replaces all instances across files)")] string target,
-        string commitMessage,
         CancellationToken cancellationToken = default) {
 
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
@@ -754,22 +723,9 @@ public static class ModificationTools {
                 // Add non-code files to the list
                 modifiedFiles.AddRange(nonCodeFilesModified);
 
-                string finalCommitMessage = $"Find and replace on {target}: {commitMessage}";
-
                 // Apply the changes to code files
                 if (changedDocuments.Count > 0) {
-                    await modificationService.ApplyChangesAsync(newSolution, cancellationToken, finalCommitMessage, nonCodeFilesModified);
-                }
-
-                // Commit non-code files (if we only modified non-code files)
-                if (nonCodeFilesModified.Count > 0 && changedDocuments.Count == 0) {
-                    // Get solution path
-                    var solutionPath = originalSolution.FilePath;
-                    if (string.IsNullOrEmpty(solutionPath)) {
-                        logger.LogDebug("Solution path is not available, skipping Git operations for non-code files");
-                    } else {
-                        await documentOperations.ProcessGitOperationsAsync(nonCodeFilesModified, cancellationToken, finalCommitMessage);
-                    }
+                    await modificationService.ApplyChangesAsync(newSolution, cancellationToken, nonCodeFilesModified);
                 }
 
                 // Check for compilation errors in changed code documents
@@ -842,8 +798,7 @@ public static class ModificationTools {
                         ILogger<ModificationToolsLogCategory> logger,
                         [Description("FQN of the member to move.")] string fullyQualifiedMemberName,
                         [Description("FQN of the destination type or namespace where the member should be moved.")] string fullyQualifiedDestinationTypeOrNamespaceName,
-                        string commitMessage,
-                        CancellationToken cancellationToken = default) {
+                                        CancellationToken cancellationToken = default) {
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
             ErrorHandlingHelpers.ValidateStringParameter(fullyQualifiedMemberName, nameof(fullyQualifiedMemberName), logger);
             ErrorHandlingHelpers.ValidateStringParameter(fullyQualifiedDestinationTypeOrNamespaceName, nameof(fullyQualifiedDestinationTypeOrNamespaceName), logger);
@@ -971,8 +926,7 @@ public static class ModificationTools {
 
                 currentSolution = await RemoveMemberFromParentAsync(sourceDocumentInCurrentSolution, sourceMemberNodeInCurrentTree, modificationService, cancellationToken);
 
-                string finalCommitMessage = $"Move {memberName} to {fullyQualifiedDestinationTypeOrNamespaceName}: {commitMessage}";
-                await modificationService.ApplyChangesAsync(currentSolution, cancellationToken, finalCommitMessage);
+                await modificationService.ApplyChangesAsync(currentSolution, cancellationToken);
 
                 // After ApplyChangesAsync, the solutionManager.CurrentSolution should be the most up-to-date.
                 // Re-fetch documents from there for final error checking.
@@ -1151,9 +1105,8 @@ public static class ModificationTools {
 
             // Only write if content changed
             if (newContent != originalContent) {
-                // Note: we don't pass commit message here as we'll handle Git at a higher level
-                // for all modified non-code files at once
-                await documentOperations.WriteFileAsync(filePath, newContent, true, cancellationToken, string.Empty);
+                // Write the modified content to the file
+                await documentOperations.WriteFileAsync(filePath, newContent, true, cancellationToken);
                 modifiedFiles.Add(filePath);
 
                 // Generate diff

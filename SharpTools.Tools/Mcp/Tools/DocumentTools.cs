@@ -81,7 +81,6 @@ public static class DocumentTools {
                 ILogger<DocumentToolsLogCategory> logger,
                 [Description("The absolute path where the file should be created.")] string filePath,
                 [Description("The content to write to the file. For C#, omit indentation to save tokens. Code will be auto-formatted.")] string content,
-                string commitMessage,
                 CancellationToken cancellationToken = default) {
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
             ErrorHandlingHelpers.ValidateStringParameter(filePath, "filePath", logger);
@@ -101,13 +100,12 @@ public static class DocumentTools {
                 throw new McpException($"Cannot create file at {filePath}. Path is not writable.");
             }
 
-            string finalCommitMessage = $"Create {Path.GetFileName(filePath)}: " + commitMessage;
             try {
                 // Determine if it's a code file that should be tracked by Roslyn
                 bool isCodeFile = documentOperations.IsCodeFile(filePath);
 
                 // Write the file content
-                var success = await documentOperations.WriteFileAsync(filePath, content, false, cancellationToken, finalCommitMessage);
+                var success = await documentOperations.WriteFileAsync(filePath, content, false, cancellationToken);
                 if (!success) {
                     throw new McpException($"Failed to create file at {filePath} for unknown reasons.");
                 }
@@ -163,7 +161,6 @@ public static class DocumentTools {
         ILogger<DocumentToolsLogCategory> logger,
         [Description("The absolute path to the file to overwrite.")] string filePath,
         [Description("The content to write to the file. For C#, omit indentation to save tokens. Code will be auto-formatted.")] string content,
-        string commitMessage,
         CancellationToken cancellationToken = default) {
         return await ErrorHandlingHelpers.ExecuteWithErrorHandlingAsync(async () => {
             ErrorHandlingHelpers.ValidateStringParameter(filePath, "filePath", logger);
@@ -177,7 +174,6 @@ public static class DocumentTools {
                 throw new McpException($"Cannot write to file at {filePath}. Path is not writable.");
             }
 
-            string finalCommitMessage = $"Update {Path.GetFileName(filePath)}: " + commitMessage;
             try {
                 // Read the original content for diff
                 string originalContent = "";
@@ -206,8 +202,8 @@ public static class DocumentTools {
                     var newDocument = existingDocument.WithText(newText);
                     var solution = newDocument.Project.Solution;
 
-                    // Apply the changes to the workspace using the code modification service with the commit message
-                    await codeModificationService.ApplyChangesAsync(solution, cancellationToken, finalCommitMessage);
+                    // Apply the changes to the workspace using the code modification service
+                    await codeModificationService.ApplyChangesAsync(solution, cancellationToken);
 
                     // Check for compilation errors
                     var (hasErrors, errorMessages) = await ContextInjectors.CheckCompilationErrorsAsync(
@@ -218,7 +214,7 @@ public static class DocumentTools {
                         $"Overwrote file in project {existingDocument.Project.Name}";
                 } else {
                     // For non-solution files or non-code files, use standard file writing
-                    var success = await documentOperations.WriteFileAsync(filePath, content, true, cancellationToken, finalCommitMessage);
+                    var success = await documentOperations.WriteFileAsync(filePath, content, true, cancellationToken);
                     if (!success) {
                         throw new McpException($"Failed to overwrite file at {filePath} for unknown reasons.");
                     }

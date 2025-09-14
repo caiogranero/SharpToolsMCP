@@ -19,7 +19,6 @@ public static class ServiceCollectionExtensions {
         services.AddSingleton<IFuzzyFqnLookupService, FuzzyFqnLookupService>();
         services.AddSingleton<ISolutionManager, SolutionManager>();
         services.AddSingleton<ICodeAnalysisService, CodeAnalysisService>();
-        services.AddSingleton<IGitService, GitService>();
         services.AddSingleton<ICodeModificationService, CodeModificationService>();
         services.AddSingleton<IEditorConfigProvider, EditorConfigProvider>();
         services.AddSingleton<IDocumentOperationsService, DocumentOperationsService>();

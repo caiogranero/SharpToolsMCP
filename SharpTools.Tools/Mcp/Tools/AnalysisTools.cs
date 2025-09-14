@@ -1589,7 +1589,7 @@ public static partial class AnalysisTools {
             // Apply changes
             var newDocument = document.WithSyntaxRoot(newRoot);
             var formatted = await modificationService.FormatDocumentAsync(newDocument, cancellationToken);
-            await modificationService.ApplyChangesAsync(formatted.Project.Solution, cancellationToken, "Manage Usings");
+            await modificationService.ApplyChangesAsync(formatted.Project.Solution, cancellationToken);
 
             // Verify changes were successful
             string diffResult = ContextInjectors.CreateCodeDiff(
@@ -1692,7 +1692,7 @@ public static partial class AnalysisTools {
             var newSolution = await modificationService.ReplaceNodeAsync(document.Id, memberDecl, newMember, cancellationToken);
             var formatted = await modificationService.FormatDocumentAsync(
                 newSolution.GetDocument(document.Id)!, cancellationToken);
-            await modificationService.ApplyChangesAsync(formatted.Project.Solution, cancellationToken, "Manage Attributes");
+            await modificationService.ApplyChangesAsync(formatted.Project.Solution, cancellationToken);
 
             // Return updated state to verify the change
             string diffResult = ContextInjectors.CreateCodeDiff(

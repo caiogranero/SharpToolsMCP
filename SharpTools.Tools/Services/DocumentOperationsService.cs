@@ -12,7 +12,6 @@ namespace SharpTools.Tools.Services;
 public class DocumentOperationsService : IDocumentOperationsService {
     private readonly ISolutionManager _solutionManager;
     private readonly ICodeModificationService _modificationService;
-    private readonly IGitService _gitService;
     private readonly ILogger<DocumentOperationsService> _logger;
 
     // Extensions for common code file types that can be formatted
@@ -28,11 +27,9 @@ public class DocumentOperationsService : IDocumentOperationsService {
     public DocumentOperationsService(
         ISolutionManager solutionManager,
         ICodeModificationService modificationService,
-        IGitService gitService,
         ILogger<DocumentOperationsService> logger) {
         _solutionManager = solutionManager;
         _modificationService = modificationService;
-        _gitService = gitService;
         _logger = logger;
     }
 
@@ -59,7 +56,7 @@ public class DocumentOperationsService : IDocumentOperationsService {
 
         return (content, lines.Length);
     }
-    public async Task<bool> WriteFileAsync(string filePath, string content, bool overwriteIfExists, CancellationToken cancellationToken, string commitMessage) {
+    public async Task<bool> WriteFileAsync(string filePath, string content, bool overwriteIfExists, CancellationToken cancellationToken) {
         var pathInfo = GetPathInfo(filePath);
 
         if (!pathInfo.IsWritable) {
@@ -89,11 +86,6 @@ public class DocumentOperationsService : IDocumentOperationsService {
         var bestProject = FindMostAppropriateProject(filePath);
         if (!pathInfo.IsFormattable || bestProject is null || string.IsNullOrWhiteSpace(bestProject.FilePath)) {
             _logger.LogWarning("Added non-code file: {FilePath}", filePath);
-            if (string.IsNullOrEmpty(commitMessage)) {
-                return true; // No commit message provided, don't commit, just return
-            }
-            //just commit the file
-            await ProcessGitOperationsAsync([filePath], cancellationToken, commitMessage);
             return true;
         }
 
@@ -116,9 +108,9 @@ public class DocumentOperationsService : IDocumentOperationsService {
             _logger.LogWarning("Document not found in solution: {FilePath}", filePath);
             return false;
         }
-        // If it's a code file, try to format it, which will also commit it
-        if (await TryFormatAndCommitFileAsync(document, cancellationToken, commitMessage)) {
-            _logger.LogInformation("File formatted and committed: {FilePath}", filePath);
+        // If it's a code file, try to format it
+        if (await TryFormatFileAsync(document, cancellationToken)) {
+            _logger.LogInformation("File formatted: {FilePath}", filePath);
             return true;
         } else {
             _logger.LogWarning("Failed to format file: {FilePath}", filePath);
@@ -358,12 +350,12 @@ public class DocumentOperationsService : IDocumentOperationsService {
 
         return pathSegments.Any(segment => UnsafeDirectories.Contains(segment));
     }
-    private async Task<bool> TryFormatAndCommitFileAsync(Document document, CancellationToken cancellationToken, string commitMessage) {
+    private async Task<bool> TryFormatFileAsync(Document document, CancellationToken cancellationToken) {
         try {
             var formattedDocument = await _modificationService.FormatDocumentAsync(document, cancellationToken);
-            // Apply the formatting changes with the commit message
+            // Apply the formatting changes
             var newSolution = formattedDocument.Project.Solution;
-            await _modificationService.ApplyChangesAsync(newSolution, cancellationToken, commitMessage);
+            await _modificationService.ApplyChangesAsync(newSolution, cancellationToken);
 
             _logger.LogInformation("Document {FilePath} formatted successfully", document.FilePath);
             return true;
@@ -380,41 +372,5 @@ public class DocumentOperationsService : IDocumentOperationsService {
         }
 
         return i > 0 ? line.Substring(i) : line;
-    }
-    public async Task ProcessGitOperationsAsync(IEnumerable<string> filePaths, CancellationToken cancellationToken, string commitMessage) {
-        var filesList = filePaths.Where(f => !string.IsNullOrEmpty(f) && File.Exists(f)).ToList();
-        if (!filesList.Any()) {
-            return;
-        }
-
-        try {
-            // Get solution path
-            var solutionPath = _solutionManager.CurrentSolution?.FilePath;
-            if (string.IsNullOrEmpty(solutionPath)) {
-                _logger.LogDebug("Solution path is not available, skipping Git operations");
-                return;
-            }
-
-            // Check if solution is in a git repo
-            if (!await _gitService.IsRepositoryAsync(solutionPath, cancellationToken)) {
-                _logger.LogDebug("Solution is not in a Git repository, skipping Git operations");
-                return;
-            }
-
-            _logger.LogDebug("Solution is in a Git repository, processing Git operations for {Count} files", filesList.Count);
-
-            // Check if already on sharptools branch
-            if (!await _gitService.IsOnSharpToolsBranchAsync(solutionPath, cancellationToken)) {
-                _logger.LogInformation("Not on a SharpTools branch, creating one");
-                await _gitService.EnsureSharpToolsBranchAsync(solutionPath, cancellationToken);
-            }
-
-            // Commit changes with the provided commit message
-            await _gitService.CommitChangesAsync(solutionPath, filesList, commitMessage, cancellationToken);
-            _logger.LogInformation("Git operations completed successfully for {Count} files with commit message: {CommitMessage}", filesList.Count, commitMessage);
-        } catch (Exception ex) {
-            // Log but don't fail the operation if Git operations fail
-            _logger.LogWarning(ex, "Git operations failed for {Count} files but file operations were still applied", filesList.Count);
-        }
     }
 }
