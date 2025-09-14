@@ -18,6 +18,12 @@ namespace SharpTools.Tools.Services {
 
             public static readonly int MaxDegreesOfParallelism = Math.Max(1, Environment.ProcessorCount / 2);
 
+            /// <summary>
+            /// Phase 2 Optimization: Memory-aware parallelism thresholds
+            /// </summary>
+            public const double MemoryPressureThreshold = 0.8; // 80% memory usage
+            public const double HighMemoryPressureThreshold = 0.9; // 90% memory usage
+
             public const int MethodLineCountFilter = 10;
             public const double DefaultSimilarityThreshold = 0.7;
 
@@ -191,10 +197,14 @@ namespace SharpTools.Tools.Services {
 
             var allMethodFeatures = new System.Collections.Concurrent.ConcurrentBag<MethodSemanticFeatures>();
 
+            // Phase 2 Optimization: Adaptive parallelism based on memory pressure
+            var adaptiveMaxDOP = GetAdaptiveMaxDegreeOfParallelism();
             var parallelOptions = new ParallelOptions {
-                MaxDegreeOfParallelism = Tuning.MaxDegreesOfParallelism,
+                MaxDegreeOfParallelism = adaptiveMaxDOP,
                 CancellationToken = cancellationToken
             };
+
+            _logger.LogDebug("Using adaptive parallelism: MaxDOP={MaxDOP} (Memory pressure consideration)", adaptiveMaxDOP);
 
             var projects = _solutionManager.GetProjects().ToList(); // Materialize to avoid issues with concurrent modification if GetProjects() is lazy
 
@@ -212,27 +222,29 @@ namespace SharpTools.Tools.Services {
                 }
                 var documents = project.Documents.ToList(); // Materialize documents for the current project
 
-                await Parallel.ForEachAsync(documents, parallelOptions, async (document, docCt) => {
-                    if (docCt.IsCancellationRequested) return;
-                    if (!document.SupportsSyntaxTree || !document.SupportsSemanticModel) return;
+                // Phase 2 Optimization: Avoid nested parallelism to prevent thread pool starvation
+                // Process documents sequentially within each project to reduce memory pressure
+                foreach (var document in documents) {
+                    if (cancellationToken.IsCancellationRequested) return;
+                    if (!document.SupportsSyntaxTree || !document.SupportsSemanticModel) continue;
 
                     _logger.LogTrace("Analyzing document: {DocumentFilePath}", document.FilePath);
-                    var syntaxTree = await document.GetSyntaxTreeAsync(docCt);
-                    var semanticModel = await document.GetSemanticModelAsync(docCt);
+                    var syntaxTree = await document.GetSyntaxTreeAsync(cancellationToken);
+                    var semanticModel = await document.GetSemanticModelAsync(cancellationToken);
                     if (syntaxTree == null || semanticModel == null) return;
 
-                    var methodDeclarations = syntaxTree.GetRoot(docCt).DescendantNodes().OfType<MethodDeclarationSyntax>();
+                    var methodDeclarations = syntaxTree.GetRoot(cancellationToken).DescendantNodes().OfType<MethodDeclarationSyntax>();
 
                     foreach (var methodDecl in methodDeclarations) {
-                        if (docCt.IsCancellationRequested) break;
+                        if (cancellationToken.IsCancellationRequested) break;
 
-                        var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl, docCt) as IMethodSymbol;
+                        var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl, cancellationToken) as IMethodSymbol;
                         if (methodSymbol == null || methodSymbol.IsAbstract || methodSymbol.IsExtern || ToolHelpers.IsPropertyAccessor(methodSymbol)) {
                             continue;
                         }
 
                         try {
-                            var features = await ExtractFeaturesAsync(methodSymbol, methodDecl, document, semanticModel, docCt);
+                            var features = await ExtractFeaturesAsync(methodSymbol, methodDecl, document, semanticModel, cancellationToken);
                             if (features != null) {
                                 allMethodFeatures.Add(features);
                             }
@@ -242,7 +254,13 @@ namespace SharpTools.Tools.Services {
                             _logger.LogWarning(ex, "Failed to extract features for method {MethodName} in {FilePath}", methodSymbol?.Name ?? "Unknown", document.FilePath);
                         }
                     }
-                });
+
+                    // Phase 2 Optimization: Check memory pressure periodically and adapt
+                    if (ShouldReduceParallelism()) {
+                        _logger.LogWarning("High memory pressure detected during method analysis. Forcing garbage collection.");
+                        GC.Collect(2, GCCollectionMode.Forced, blocking: false);
+                    }
+                }
             });
 
             if (cancellationToken.IsCancellationRequested) {
@@ -509,10 +527,14 @@ namespace SharpTools.Tools.Services {
 
             var allClassFeatures = new System.Collections.Concurrent.ConcurrentBag<ClassSemanticFeatures>();
 
+            // Phase 2 Optimization: Adaptive parallelism based on memory pressure
+            var adaptiveMaxDOP = GetAdaptiveMaxDegreeOfParallelism();
             var parallelOptions = new ParallelOptions {
-                MaxDegreeOfParallelism = Tuning.MaxDegreesOfParallelism,
+                MaxDegreeOfParallelism = adaptiveMaxDOP,
                 CancellationToken = cancellationToken
             };
+
+            _logger.LogDebug("Using adaptive parallelism: MaxDOP={MaxDOP} (Memory pressure consideration)", adaptiveMaxDOP);
 
             var projects = _solutionManager.GetProjects().ToList(); // Materialize
 
@@ -530,30 +552,32 @@ namespace SharpTools.Tools.Services {
                 }
                 var documents = project.Documents.ToList(); // Materialize
 
-                await Parallel.ForEachAsync(documents, parallelOptions, async (document, docCt) => {
-                    if (docCt.IsCancellationRequested) return;
-                    if (!document.SupportsSyntaxTree || !document.SupportsSemanticModel) return;
+                // Phase 2 Optimization: Avoid nested parallelism to prevent thread pool starvation
+                // Process documents sequentially within each project to reduce memory pressure
+                foreach (var document in documents) {
+                    if (cancellationToken.IsCancellationRequested) return;
+                    if (!document.SupportsSyntaxTree || !document.SupportsSemanticModel) continue;
 
                     _logger.LogTrace("Analyzing document for classes: {DocumentFilePath}", document.FilePath);
-                    var syntaxTree = await document.GetSyntaxTreeAsync(docCt);
-                    var semanticModel = await document.GetSemanticModelAsync(docCt);
+                    var syntaxTree = await document.GetSyntaxTreeAsync(cancellationToken);
+                    var semanticModel = await document.GetSemanticModelAsync(cancellationToken);
                     if (syntaxTree == null || semanticModel == null) return;
 
-                    var classDeclarations = syntaxTree.GetRoot(docCt).DescendantNodes()
+                    var classDeclarations = syntaxTree.GetRoot(cancellationToken).DescendantNodes()
                         .OfType<TypeDeclarationSyntax>()
                         .Where(tds => tds.Kind() == Microsoft.CodeAnalysis.CSharp.SyntaxKind.ClassDeclaration ||
                                       tds.Kind() == Microsoft.CodeAnalysis.CSharp.SyntaxKind.RecordDeclaration);
 
                     foreach (var classDecl in classDeclarations) {
-                        if (docCt.IsCancellationRequested) break;
+                        if (cancellationToken.IsCancellationRequested) break;
 
-                        var classSymbol = semanticModel.GetDeclaredSymbol(classDecl, docCt) as INamedTypeSymbol;
+                        var classSymbol = semanticModel.GetDeclaredSymbol(classDecl, cancellationToken) as INamedTypeSymbol;
                         if (classSymbol == null || classSymbol.IsAbstract || classSymbol.IsStatic) {
                             continue;
                         }
 
                         try {
-                            var features = await ExtractClassFeaturesAsync(classSymbol, classDecl, document, semanticModel, docCt);
+                            var features = await ExtractClassFeaturesAsync(classSymbol, classDecl, document, semanticModel, cancellationToken);
                             if (features != null) {
                                 allClassFeatures.Add(features);
                             }
@@ -563,7 +587,13 @@ namespace SharpTools.Tools.Services {
                             _logger.LogWarning(ex, "Failed to extract features for class {ClassName} in {FilePath}", classSymbol?.Name ?? "Unknown", document.FilePath);
                         }
                     }
-                });
+
+                    // Phase 2 Optimization: Check memory pressure periodically and adapt
+                    if (ShouldReduceParallelism()) {
+                        _logger.LogWarning("High memory pressure detected during class analysis. Forcing garbage collection.");
+                        GC.Collect(2, GCCollectionMode.Forced, blocking: false);
+                    }
+                }
             });
 
             if (cancellationToken.IsCancellationRequested) {
@@ -932,6 +962,51 @@ namespace SharpTools.Tools.Services {
             // Handle pointer element type
             if (typeSymbol is IPointerTypeSymbol pointerTypeSymbol) {
                 AddTypeAndNamespaceIfExternal(pointerTypeSymbol.PointedAtType, containingClassSymbol, externalTypeFqns, usedNamespaceFqns);
+            }
+        }
+
+        /// <summary>
+        /// Phase 2 Optimization: Adaptive parallelism based on memory pressure
+        /// </summary>
+        private int GetAdaptiveMaxDegreeOfParallelism() {
+            try {
+                var memoryInfo = GC.GetGCMemoryInfo();
+                double memoryPressure = (double)memoryInfo.MemoryLoadBytes / memoryInfo.TotalAvailableMemoryBytes;
+
+                int adaptiveDOP;
+                if (memoryPressure > Tuning.HighMemoryPressureThreshold) {
+                    // Very high memory pressure: Use minimal parallelism
+                    adaptiveDOP = 1;
+                    _logger.LogWarning("Very high memory pressure ({MemoryPressure:P1}). Using minimal parallelism (DOP=1).", memoryPressure);
+                } else if (memoryPressure > Tuning.MemoryPressureThreshold) {
+                    // High memory pressure: Reduce parallelism significantly
+                    adaptiveDOP = Math.Max(1, Environment.ProcessorCount / 4);
+                    _logger.LogWarning("High memory pressure ({MemoryPressure:P1}). Reducing parallelism to DOP={AdaptiveDOP}.", memoryPressure, adaptiveDOP);
+                } else {
+                    // Normal memory pressure: Use standard parallelism
+                    adaptiveDOP = Tuning.MaxDegreesOfParallelism;
+                    _logger.LogDebug("Normal memory pressure ({MemoryPressure:P1}). Using standard parallelism (DOP={AdaptiveDOP}).", memoryPressure, adaptiveDOP);
+                }
+
+                return adaptiveDOP;
+            } catch (Exception ex) {
+                _logger.LogWarning(ex, "Failed to determine memory pressure. Using default parallelism.");
+                return Tuning.MaxDegreesOfParallelism;
+            }
+        }
+
+        /// <summary>
+        /// Phase 2 Optimization: Check if we should reduce parallelism due to memory pressure
+        /// </summary>
+        private bool ShouldReduceParallelism() {
+            try {
+                var memoryInfo = GC.GetGCMemoryInfo();
+                double memoryPressure = (double)memoryInfo.MemoryLoadBytes / memoryInfo.TotalAvailableMemoryBytes;
+
+                return memoryPressure > Tuning.MemoryPressureThreshold;
+            } catch (Exception ex) {
+                _logger.LogTrace(ex, "Failed to check memory pressure for parallelism reduction.");
+                return false;
             }
         }
     }

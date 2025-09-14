@@ -5,7 +5,8 @@
       "Bash(dotnet test:*)",
       "mcp__sharptools",
       "Bash(git remote set-url:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []

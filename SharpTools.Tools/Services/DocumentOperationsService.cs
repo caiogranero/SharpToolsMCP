@@ -20,6 +20,12 @@ public class DocumentOperationsService : IDocumentOperationsService {
         ".json", ".xml", ".config", ".md", ".fs", ".fsx", ".fsi", ".vb"
     };
 
+    /// <summary>
+    /// Phase 2 Optimization: File size threshold for streaming vs in-memory processing
+    /// Files larger than this will be processed using streaming to avoid memory spikes
+    /// </summary>
+    private const long StreamingThresholdBytes = 50 * 1024 * 1024; // 50MB
+
     private static readonly HashSet<string> UnsafeDirectories = new(StringComparer.OrdinalIgnoreCase) {
         ".git", ".vs", "bin", "obj", "node_modules"
     };
@@ -44,6 +50,14 @@ public class DocumentOperationsService : IDocumentOperationsService {
             throw new UnauthorizedAccessException($"Reading from this path is not allowed: {filePath}");
         }
 
+        // Phase 2 Optimization: Use streaming for large files to prevent memory spikes
+        var streamingFileInfo = new FileInfo(filePath);
+        if (streamingFileInfo.Length > StreamingThresholdBytes) {
+            _logger.LogDebug("Using streaming file processing for large file: {FilePath} ({FileSize:N0} bytes)", filePath, fileInfo.Length);
+            return await ReadLargeFileStreamingAsync(filePath, omitLeadingSpaces, cancellationToken).ConfigureAwait(false);
+        }
+
+        // For smaller files, use the optimized in-memory approach
         string content = await File.ReadAllTextAsync(filePath, cancellationToken).ConfigureAwait(false);
         var lines = content.Split(["\r\n", "\r", "\n"], StringSplitOptions.None);
 
@@ -384,6 +398,48 @@ public class DocumentOperationsService : IDocumentOperationsService {
             _logger.LogWarning(ex, "Failed to format file {FilePath}", document.FilePath);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Phase 2 Optimization: Stream large files to prevent memory spikes
+    /// Processes files line-by-line instead of loading entire content into memory
+    /// </summary>
+    private async Task<(string contents, int lines)> ReadLargeFileStreamingAsync(string filePath, bool omitLeadingSpaces, CancellationToken cancellationToken) {
+        using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536);
+        using var reader = new StreamReader(fileStream, detectEncodingFromByteOrderMarks: true, bufferSize: 65536);
+
+        var contentBuilder = new StringBuilder();
+        var lineCount = 0;
+        const int batchSize = 1000; // Process in batches for cancellation checking
+
+        string? line;
+        while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) != null) {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Apply leading space trimming if requested
+            if (omitLeadingSpaces) {
+                line = TrimLeadingSpaces(line);
+            }
+
+            // Add line to content
+            if (lineCount > 0) {
+                contentBuilder.AppendLine();
+            }
+            contentBuilder.Append(line);
+
+            lineCount++;
+
+            // Check cancellation periodically during large file processing
+            if (lineCount % batchSize == 0) {
+                cancellationToken.ThrowIfCancellationRequested();
+                _logger.LogTrace("Streaming file processing progress: {LineCount} lines processed from {FilePath}", lineCount, filePath);
+            }
+        }
+
+        var content = contentBuilder.ToString();
+        _logger.LogDebug("Completed streaming file processing: {FilePath} ({LineCount} lines, {ContentLength:N0} characters)", filePath, lineCount, content.Length);
+
+        return (content, lineCount);
     }
 
     private static string TrimLeadingSpaces(string line) {
