@@ -10,6 +10,7 @@ global using Microsoft.CodeAnalysis.MSBuild;
 global using Microsoft.CodeAnalysis.Options;
 global using Microsoft.CodeAnalysis.Rename;
 global using Microsoft.CodeAnalysis.Text;
+global using Microsoft.Extensions.Caching.Memory;
 global using Microsoft.Extensions.DependencyInjection;
 global using Microsoft.Extensions.Logging;
 global using ModelContextProtocol.Protocol;

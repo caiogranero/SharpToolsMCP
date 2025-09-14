@@ -12,8 +12,15 @@ public sealed class SolutionManager : ISolutionManager {
     private MetadataLoadContext? _metadataLoadContext;
     private PathAssemblyResolver? _pathAssemblyResolver;
     private HashSet<string> _assemblyPathsForReflection = new();
-    private readonly ConcurrentDictionary<ProjectId, Compilation> _compilationCache = new();
-    private readonly ConcurrentDictionary<DocumentId, SemanticModel> _semanticModelCache = new();
+    // Bounded caches with size limits to prevent unbounded memory growth
+    private readonly MemoryCache _compilationCache = new(new MemoryCacheOptions {
+        SizeLimit = 50, // Max 50 compilations (~2.5GB max)
+        CompactionPercentage = 0.2, // Remove 20% when limit reached
+    });
+    private readonly MemoryCache _semanticModelCache = new(new MemoryCacheOptions {
+        SizeLimit = 200, // Max 200 semantic models (~1GB max)
+        CompactionPercentage = 0.2
+    });
     private readonly ConcurrentDictionary<string, Type> _allLoadedReflectionTypesCache = new();
     [MemberNotNullWhen(true, nameof(_workspace), nameof(_currentSolution))]
     public bool IsSolutionLoaded => _workspace != null && _currentSolution != null;
@@ -37,7 +44,7 @@ public sealed class SolutionManager : ISolutionManager {
             _workspace = MSBuildWorkspace.Create(properties, MefHostServices.DefaultHost);
             _workspace.WorkspaceFailed += OnWorkspaceFailed;
             _logger.LogInformation("Loading solution: {SolutionPath}", solutionPath);
-            _currentSolution = await _workspace.OpenSolutionAsync(solutionPath, new ProgressReporter(_logger), cancellationToken);
+            _currentSolution = await _workspace.OpenSolutionAsync(solutionPath, new ProgressReporter(_logger), cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("Solution loaded successfully with {ProjectCount} projects.", _currentSolution.Projects.Count());
             InitializeMetadataContextAndReflectionCache(_currentSolution, cancellationToken);
         } catch (Exception ex) {
@@ -224,7 +231,7 @@ public sealed class SolutionManager : ISolutionManager {
             _logger.LogWarning("Cannot reload solution: No solution loaded.");
             return;
         }
-        await LoadSolutionAsync(_workspace.CurrentSolution.FilePath!, cancellationToken);
+        await LoadSolutionAsync(_workspace.CurrentSolution.FilePath!, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Current solution state has been refreshed from workspace.");
     }
     private void OnWorkspaceFailed(object? sender, WorkspaceDiagnosticEventArgs e) {
@@ -240,7 +247,7 @@ public sealed class SolutionManager : ISolutionManager {
         // Check cancellation before starting lookup
         cancellationToken.ThrowIfCancellationRequested();
         // Use fuzzy FQN lookup service
-        var matches = await _fuzzyFqnLookupService.FindMatchesAsync(fullyQualifiedTypeName, this, cancellationToken);
+        var matches = await _fuzzyFqnLookupService.FindMatchesAsync(fullyQualifiedTypeName, this, cancellationToken).ConfigureAwait(false);
         var matchList = matches.Where(m => m.Symbol is INamedTypeSymbol).ToList();
         // Check cancellation after initial matching
         cancellationToken.ThrowIfCancellationRequested();
@@ -258,7 +265,7 @@ public sealed class SolutionManager : ISolutionManager {
         foreach (var project in CurrentSolution.Projects) {
             // Check cancellation before each project
             cancellationToken.ThrowIfCancellationRequested();
-            var compilation = await GetCompilationAsync(project.Id, cancellationToken);
+            var compilation = await GetCompilationAsync(project.Id, cancellationToken).ConfigureAwait(false);
             if (compilation == null) {
                 continue;
             }
@@ -279,7 +286,7 @@ public sealed class SolutionManager : ISolutionManager {
             foreach (var project in CurrentSolution.Projects) {
                 // Check cancellation before each project
                 cancellationToken.ThrowIfCancellationRequested();
-                var compilation = await GetCompilationAsync(project.Id, cancellationToken);
+                var compilation = await GetCompilationAsync(project.Id, cancellationToken).ConfigureAwait(false);
                 if (compilation == null) {
                     continue;
                 }
@@ -310,7 +317,7 @@ public sealed class SolutionManager : ISolutionManager {
         cancellationToken.ThrowIfCancellationRequested();
 
         // Use fuzzy FQN lookup service
-        var matches = await _fuzzyFqnLookupService.FindMatchesAsync(fullyQualifiedName, this, cancellationToken);
+        var matches = await _fuzzyFqnLookupService.FindMatchesAsync(fullyQualifiedName, this, cancellationToken).ConfigureAwait(false);
         var matchList = matches.ToList();
 
         // Check cancellation after initial matching
@@ -332,7 +339,7 @@ public sealed class SolutionManager : ISolutionManager {
         cancellationToken.ThrowIfCancellationRequested();
 
         // Fall back to type lookup
-        var typeSymbol = await FindRoslynNamedTypeSymbolAsync(fullyQualifiedName, cancellationToken);
+        var typeSymbol = await FindRoslynNamedTypeSymbolAsync(fullyQualifiedName, cancellationToken).ConfigureAwait(false);
         if (typeSymbol != null) {
             return typeSymbol;
         }
@@ -346,7 +353,7 @@ public sealed class SolutionManager : ISolutionManager {
             var typeName = fullyQualifiedName.Substring(0, lastDotIndex);
             var memberName = fullyQualifiedName.Substring(lastDotIndex + 1);
 
-            var parentTypeSymbol = await FindRoslynNamedTypeSymbolAsync(typeName, cancellationToken);
+            var parentTypeSymbol = await FindRoslynNamedTypeSymbolAsync(typeName, cancellationToken).ConfigureAwait(false);
             if (parentTypeSymbol != null) {
                 // Check cancellation before final lookup step
                 cancellationToken.ThrowIfCancellationRequested();
@@ -445,7 +452,7 @@ public sealed class SolutionManager : ISolutionManager {
         }
 
         // Fast path: check cache first
-        if (_semanticModelCache.TryGetValue(documentId, out var cachedModel)) {
+        if (_semanticModelCache.TryGetValue(documentId, out SemanticModel? cachedModel)) {
             _logger.LogTrace("Returning cached semantic model for document ID: {DocumentId}", documentId);
             return cachedModel;
         }
@@ -464,9 +471,13 @@ public sealed class SolutionManager : ISolutionManager {
         // Check cancellation before expensive GetSemanticModelAsync call
         cancellationToken.ThrowIfCancellationRequested();
 
-        var model = await document.GetSemanticModelAsync(cancellationToken);
+        var model = await document.GetSemanticModelAsync(cancellationToken).ConfigureAwait(false);
         if (model != null) {
-            _semanticModelCache.TryAdd(documentId, model);
+            _semanticModelCache.Set(documentId, model, new MemoryCacheEntryOptions
+            {
+                Size = 1, // Each semantic model counts as size 1
+                SlidingExpiration = TimeSpan.FromMinutes(30) // Cache for 30 minutes of inactivity
+            });
         } else {
             _logger.LogWarning("Failed to get semantic model for document: {DocumentFilePath}", document.FilePath);
         }
@@ -482,7 +493,7 @@ public sealed class SolutionManager : ISolutionManager {
         }
 
         // Fast path: check cache first
-        if (_compilationCache.TryGetValue(projectId, out var cachedCompilation)) {
+        if (_compilationCache.TryGetValue(projectId, out Compilation? cachedCompilation)) {
             _logger.LogTrace("Returning cached compilation for project ID: {ProjectId}", projectId);
             return cachedCompilation;
         }
@@ -501,9 +512,13 @@ public sealed class SolutionManager : ISolutionManager {
         // Check cancellation before expensive GetCompilationAsync call
         cancellationToken.ThrowIfCancellationRequested();
 
-        var compilation = await project.GetCompilationAsync(cancellationToken);
+        var compilation = await project.GetCompilationAsync(cancellationToken).ConfigureAwait(false);
         if (compilation != null) {
-            _compilationCache.TryAdd(projectId, compilation);
+            _compilationCache.Set(projectId, compilation, new MemoryCacheEntryOptions
+            {
+                Size = 1, // Each compilation counts as size 1 (actual memory usage ~50-200MB each)
+                SlidingExpiration = TimeSpan.FromMinutes(60) // Cache for 60 minutes of inactivity
+            });
         } else {
             _logger.LogWarning("Failed to get compilation for project: {ProjectName}", project.Name);
         }
@@ -511,6 +526,8 @@ public sealed class SolutionManager : ISolutionManager {
     }
     public void Dispose() {
         UnloadSolution();
+        _compilationCache.Dispose();
+        _semanticModelCache.Dispose();
         GC.SuppressFinalize(this);
     }
     private class ProgressReporter : IProgress<ProjectLoadProgress> {

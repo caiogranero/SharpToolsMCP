@@ -34,7 +34,9 @@ public class DocumentOperationsService : IDocumentOperationsService {
     }
 
     public async Task<(string contents, int lines)> ReadFileAsync(string filePath, bool omitLeadingSpaces, CancellationToken cancellationToken) {
-        if (!File.Exists(filePath)) {
+        // Use FileInfo to avoid synchronous I/O blocking
+        var fileInfo = new FileInfo(filePath);
+        if (!fileInfo.Exists) {
             throw new FileNotFoundException($"File not found: {filePath}");
         }
 
@@ -42,10 +44,12 @@ public class DocumentOperationsService : IDocumentOperationsService {
             throw new UnauthorizedAccessException($"Reading from this path is not allowed: {filePath}");
         }
 
-        string content = await File.ReadAllTextAsync(filePath, cancellationToken);
+        string content = await File.ReadAllTextAsync(filePath, cancellationToken).ConfigureAwait(false);
         var lines = content.Split(["\r\n", "\r", "\n"], StringSplitOptions.None);
 
         if (omitLeadingSpaces) {
+            // Check cancellation before processing lines
+            cancellationToken.ThrowIfCancellationRequested();
 
             for (int i = 0; i < lines.Length; i++) {
                 lines[i] = TrimLeadingSpaces(lines[i]);
@@ -65,21 +69,26 @@ public class DocumentOperationsService : IDocumentOperationsService {
             throw new UnauthorizedAccessException($"Writing to this path is not allowed: {filePath}. {pathInfo.WriteRestrictionReason}");
         }
 
-        if (File.Exists(filePath) && !overwriteIfExists) {
+        // Use FileInfo to avoid synchronous I/O blocking
+        var fileInfo = new FileInfo(filePath);
+        if (fileInfo.Exists && !overwriteIfExists) {
             _logger.LogWarning("File already exists and overwrite not allowed: {FilePath}", filePath);
             return false;
         }
 
-        // Ensure directory exists
+        // Ensure directory exists using DirectoryInfo
         string? directory = Path.GetDirectoryName(filePath);
-        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory)) {
-            Directory.CreateDirectory(directory);
+        if (!string.IsNullOrEmpty(directory)) {
+            var dirInfo = new DirectoryInfo(directory);
+            if (!dirInfo.Exists) {
+                dirInfo.Create();
+            }
         }
 
         // Write the content to the file
-        await File.WriteAllTextAsync(filePath, content, cancellationToken);
+        await File.WriteAllTextAsync(filePath, content, cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("File {Operation} at {FilePath}",
-            File.Exists(filePath) ? "overwritten" : "created", filePath);
+            fileInfo.Exists ? "overwritten" : "created", filePath);
 
 
         // Find the most appropriate project for this file path
@@ -90,12 +99,12 @@ public class DocumentOperationsService : IDocumentOperationsService {
         }
 
         Project? legacyProject = null;
-        bool isSdkStyleProject = await IsSDKStyleProjectAsync(bestProject.FilePath, cancellationToken);
+        bool isSdkStyleProject = await IsSDKStyleProjectAsync(bestProject.FilePath, cancellationToken).ConfigureAwait(false);
         if (isSdkStyleProject) {
             _logger.LogInformation("File added to SDK-style project: {ProjectPath}. Reloading Solution to pick up changes.", bestProject.FilePath);
-            await _solutionManager.ReloadSolutionFromDiskAsync(cancellationToken);
+            await _solutionManager.ReloadSolutionFromDiskAsync(cancellationToken).ConfigureAwait(false);
         } else {
-            legacyProject = await TryAddFileToLegacyProjectAsync(filePath, bestProject, cancellationToken);
+            legacyProject = await TryAddFileToLegacyProjectAsync(filePath, bestProject, cancellationToken).ConfigureAwait(false);
         }
         var newSolution = legacyProject?.Solution ?? _solutionManager.CurrentSolution;
         var documentId = newSolution?.GetDocumentIdsWithFilePath(filePath).FirstOrDefault();
@@ -109,7 +118,7 @@ public class DocumentOperationsService : IDocumentOperationsService {
             return false;
         }
         // If it's a code file, try to format it
-        if (await TryFormatFileAsync(document, cancellationToken)) {
+        if (await TryFormatFileAsync(document, cancellationToken).ConfigureAwait(false)) {
             _logger.LogInformation("File formatted: {FilePath}", filePath);
             return true;
         } else {
@@ -119,7 +128,9 @@ public class DocumentOperationsService : IDocumentOperationsService {
     }
 
     private async Task<Project?> TryAddFileToLegacyProjectAsync(string filePath, Project project, CancellationToken cancellationToken) {
-        if (!_solutionManager.IsSolutionLoaded || !File.Exists(filePath)) {
+        // Use FileInfo to avoid synchronous I/O blocking
+        var fileInfo = new FileInfo(filePath);
+        if (!_solutionManager.IsSolutionLoaded || !fileInfo.Exists) {
             return null;
         }
 
@@ -153,7 +164,11 @@ public class DocumentOperationsService : IDocumentOperationsService {
             _logger.LogInformation("Adding file to {ProjectName}: {FilePath}", project.Name, filePath);
 
             // Create SourceText from file content
-            var fileContent = await File.ReadAllTextAsync(filePath, cancellationToken);
+            var fileContent = await File.ReadAllTextAsync(filePath, cancellationToken).ConfigureAwait(false);
+
+            // Check cancellation before creating SourceText
+            cancellationToken.ThrowIfCancellationRequested();
+
             var sourceText = SourceText.From(fileContent);
 
             // Add the document to the project in memory
@@ -166,7 +181,7 @@ public class DocumentOperationsService : IDocumentOperationsService {
 
     private async Task<bool> IsSDKStyleProjectAsync(string projectFilePath, CancellationToken cancellationToken) {
         try {
-            var content = await File.ReadAllTextAsync(projectFilePath, cancellationToken);
+            var content = await File.ReadAllTextAsync(projectFilePath, cancellationToken).ConfigureAwait(false);
 
             // Use XmlDocument for proper parsing
             var xmlDoc = new XmlDocument();
@@ -233,7 +248,8 @@ public class DocumentOperationsService : IDocumentOperationsService {
     }
 
     public bool FileExists(string filePath) {
-        return File.Exists(filePath);
+        // Use FileInfo to avoid synchronous I/O blocking
+        return new FileInfo(filePath).Exists;
     }
 
     public bool IsPathReadable(string filePath) {
@@ -250,8 +266,9 @@ public class DocumentOperationsService : IDocumentOperationsService {
             return false;
         }
 
-        // First check if file exists but is not part of the solution
-        if (File.Exists(filePath) && !IsReferencedBySolution(filePath)) {
+        // First check if file exists but is not part of the solution - use FileInfo to avoid blocking
+        var fileInfo = new FileInfo(filePath);
+        if (fileInfo.Exists && !IsReferencedBySolution(filePath)) {
             return false;
         }
 
@@ -271,7 +288,9 @@ public class DocumentOperationsService : IDocumentOperationsService {
             };
         }
 
-        bool exists = File.Exists(filePath);
+        // Use FileInfo to avoid synchronous I/O blocking
+        var fileInfo = new FileInfo(filePath);
+        bool exists = fileInfo.Exists;
         bool isWithinSolution = IsPathWithinSolutionDirectory(filePath);
         bool isReferenced = IsReferencedBySolution(filePath);
         bool isFormattable = IsCodeFile(filePath);
@@ -289,12 +308,12 @@ public class DocumentOperationsService : IDocumentOperationsService {
             writeRestrictionReason = "Path is outside the solution directory";
         }
 
-        // Check if directory is read-only
+        // Check if directory is read-only using DirectoryInfo to avoid blocking
         try {
             var directoryPath = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directoryPath) && Directory.Exists(directoryPath)) {
+            if (!string.IsNullOrEmpty(directoryPath)) {
                 var dirInfo = new DirectoryInfo(directoryPath);
-                if ((dirInfo.Attributes & FileAttributes.ReadOnly) == FileAttributes.ReadOnly) {
+                if (dirInfo.Exists && (dirInfo.Attributes & FileAttributes.ReadOnly) == FileAttributes.ReadOnly) {
                     writeRestrictionReason = "Directory is read-only";
                 }
             }
@@ -328,7 +347,9 @@ public class DocumentOperationsService : IDocumentOperationsService {
     }
 
     private bool IsReferencedBySolution(string filePath) {
-        if (!_solutionManager.IsSolutionLoaded || !File.Exists(filePath)) {
+        // Use FileInfo to avoid synchronous I/O blocking
+        var fileInfo = new FileInfo(filePath);
+        if (!_solutionManager.IsSolutionLoaded || !fileInfo.Exists) {
             return false;
         }
 
@@ -352,10 +373,10 @@ public class DocumentOperationsService : IDocumentOperationsService {
     }
     private async Task<bool> TryFormatFileAsync(Document document, CancellationToken cancellationToken) {
         try {
-            var formattedDocument = await _modificationService.FormatDocumentAsync(document, cancellationToken);
+            var formattedDocument = await _modificationService.FormatDocumentAsync(document, cancellationToken).ConfigureAwait(false);
             // Apply the formatting changes
             var newSolution = formattedDocument.Project.Solution;
-            await _modificationService.ApplyChangesAsync(newSolution, cancellationToken);
+            await _modificationService.ApplyChangesAsync(newSolution, cancellationToken).ConfigureAwait(false);
 
             _logger.LogInformation("Document {FilePath} formatted successfully", document.FilePath);
             return true;

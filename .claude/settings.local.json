@@ -3,7 +3,9 @@
     "allow": [
       "Bash(dotnet build:*)",
       "Bash(dotnet test:*)",
-      "mcp__sharptools"
+      "mcp__sharptools",
+      "Bash(git remote set-url:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

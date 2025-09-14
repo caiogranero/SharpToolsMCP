@@ -79,7 +79,7 @@ public class CodeModificationService : ICodeModificationService {
                 editor.ReplaceNode(typeDeclarationNode, newTypeDeclaration);
 
                 var newDocument = editor.GetChangedDocument();
-                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken);
+                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken).ConfigureAwait(false);
                 return formattedDocument.Project.Solution;
             }
         }
@@ -88,7 +88,7 @@ public class CodeModificationService : ICodeModificationService {
         defaultEditor.AddMember(typeDeclarationNode, newMember);
 
         var changedDocument = defaultEditor.GetChangedDocument();
-        var finalDocument = await FormatDocumentAsync(changedDocument, cancellationToken);
+        var finalDocument = await FormatDocumentAsync(changedDocument, cancellationToken).ConfigureAwait(false);
         return finalDocument.Project.Solution;
     }
 
@@ -133,7 +133,7 @@ public class CodeModificationService : ICodeModificationService {
         }
 
         var newDocument = editor.GetChangedDocument();
-        var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken);
+        var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken).ConfigureAwait(false);
         return formattedDocument.Project.Solution;
     }
 
@@ -227,7 +227,7 @@ public class CodeModificationService : ICodeModificationService {
             }
 
             var newDocument = document.WithSyntaxRoot(newRoot);
-            var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken);
+            var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken).ConfigureAwait(false);
             return formattedDocument.Project.Solution;
         } else {
             // Standard node replacement
@@ -237,7 +237,7 @@ public class CodeModificationService : ICodeModificationService {
             editor.ReplaceNode(oldNode, newNode);
 
             var newDocument = editor.GetChangedDocument();
-            var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken);
+            var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken).ConfigureAwait(false);
             return formattedDocument.Project.Solution;
         }
     }
@@ -293,7 +293,7 @@ public class CodeModificationService : ICodeModificationService {
                 var newDocument = document.WithSyntaxRoot(newRoot);
 
                 // Format the document and update the solution
-                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken);
+                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken).ConfigureAwait(false);
                 changedSolution = formattedDocument.Project.Solution;
             }
         }
@@ -347,7 +347,7 @@ public class CodeModificationService : ICodeModificationService {
                                     originalText.Substring(nodeSpan.Start + nodeSpan.Length);
 
                                 var newDocument = document.WithText(SourceText.From(newFullText, sourceText.Encoding));
-                                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken);
+                                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken).ConfigureAwait(false);
                                 resultSolution = formattedDocument.Project.Solution;
                             }
                         }
@@ -405,7 +405,7 @@ public class CodeModificationService : ICodeModificationService {
             // Only update if changes were made
             if (newText != originalText) {
                 var newDocument = document.WithText(SourceText.From(newText, sourceText.Encoding));
-                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken);
+                var formattedDocument = await FormatDocumentAsync(newDocument, cancellationToken).ConfigureAwait(false);
                 resultSolution = formattedDocument.Project.Solution;
             }
         }
@@ -437,7 +437,7 @@ public class CodeModificationService : ICodeModificationService {
                 var documentToFormat = finalSolutionToApply.GetDocument(changedDocumentId);
                 if (documentToFormat != null) {
                     _logger.LogDebug("Pre-apply formatting for changed document: {DocumentPath}", documentToFormat.FilePath);
-                    var formattedDocument = await FormatDocumentAsync(documentToFormat, cancellationToken);
+                    var formattedDocument = await FormatDocumentAsync(documentToFormat, cancellationToken).ConfigureAwait(false);
                     finalSolutionToApply = formattedDocument.Project.Solution;
 
                 }
@@ -448,7 +448,7 @@ public class CodeModificationService : ICodeModificationService {
                 var addedDocument = finalSolutionToApply.GetDocument(addedDocumentId);
                 if (addedDocument != null) {
                     _logger.LogDebug("Pre-apply formatting for added document: {DocumentPath}", addedDocument.FilePath);
-                    var formattedDocument = await FormatDocumentAsync(addedDocument, cancellationToken);
+                    var formattedDocument = await FormatDocumentAsync(addedDocument, cancellationToken).ConfigureAwait(false);
                     finalSolutionToApply = formattedDocument.Project.Solution;
 
                 }
